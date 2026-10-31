@@ -76,9 +76,12 @@ enum StoreDownloadProtocol {
 
     enum Endpoint: String {
         case volumeStore, redownload, update
+        // [Asspp-ent] Attested download path (ipatool v2.7.0 `ent/download`).
+        case entDownload
 
         var versionKey: String {
-            self == .volumeStore ? "externalVersionId" : "appExtVrsId"
+            // [Asspp-ent] ent/download uses the volumeStore version key.
+            self == .volumeStore || self == .entDownload ? "externalVersionId" : "appExtVrsId"
         }
 
         var path: String {
@@ -86,8 +89,94 @@ enum StoreDownloadProtocol {
             case .volumeStore: "/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct"
             case .redownload: "/r/redownload"
             case .update: "/up/updateProduct"
+            case .entDownload: "/WebObjects/DownloadDispatch.woa/wa/ent/download"
             }
         }
+    }
+
+    // MARK: - [Asspp-ent] Attested download (kbsync / ent/download)
+
+    /// User-Agent sent by ipatool v2.7.0 on the attested path
+    /// (`pkg/appstore/appstore_kbsync.go`). Deliberately not
+    /// `Configuration.userAgent`, which the legacy chain keeps using.
+    static let entUserAgent = "Configurator/2.18 (Macintosh; OS X 15.3.2; 24D81) AppleWebKit/0620.2.4.11.6"
+
+    /// The bag may wrap the plist in other markup; mirror ApplePackage's
+    /// extraction before parsing.
+    static func plistFromBag(_ data: Data) -> [String: Any]? {
+        var plistData = data
+        if let xmlString = String(data: data, encoding: .utf8),
+           let startRange = xmlString.range(of: "<plist"),
+           let endRange = xmlString.range(of: "</plist>")
+        {
+            plistData = Data(xmlString[startRange.lowerBound ..< endRange.upperBound].utf8)
+        }
+        return (try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)) as? [String: Any]
+    }
+
+    /// The ent/download endpoint: the bag's `volumeStoreDownloadProduct` URL
+    /// supplies the DownloadDispatch host; the path is re-written to the
+    /// attested path (ipatool validates the same host/path pair).
+    static func entDownloadEndpoint(_ bag: [String: Any]) -> URL? {
+        let urlBag = bag["urlBag"] as? [String: Any] ?? [:]
+        guard let value = (bag["volumeStoreDownloadProduct"] as? String) ?? (urlBag["volumeStoreDownloadProduct"] as? String),
+              var components = URLComponents(string: value),
+              components.scheme == "https", components.user == nil, components.password == nil,
+              components.port == nil || components.port == 443,
+              components.host == "downloaddispatch.itunes.apple.com"
+        else { return nil }
+        components.path = Endpoint.entDownload.path
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    /// Serial number derivation from ipatool v2.7.0: the 5-byte constant
+    /// 0x54C8B0A988 followed by GUID bytes 2..<6, base64-encoded (9 bytes).
+    /// The legacy chain sends "0" instead.
+    static func serialNumber(guid: String) -> String? {
+        guard let guidData = guidBytes(guid), guidData.count == 6 else { return nil }
+        var serial = Data([0x54, 0xC8, 0xB0, 0xA9, 0x88])
+        serial.append(guidData.subdata(in: 2 ..< 6))
+        return serial.base64EncodedString()
+    }
+
+    private static func guidBytes(_ guid: String) -> Data? {
+        let hex = guid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard hex.count == 12, hex.allSatisfy({ $0.isHexDigit }) else { return nil }
+        var data = Data()
+        data.reserveCapacity(6)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index ..< next], radix: 16) else { return nil }
+            data.append(byte)
+            index = next
+        }
+        return data
+    }
+
+    /// Payload for the attested path (ipatool v2.7.0 `sendEntDownloadRequest`).
+    /// Note `salableAdamId` is a string here; the legacy payload sends an integer.
+    static func entPayload(appID: Int64, guid: String, version: String, kbsync: String, serialNumber: String) -> [String: Any] {
+        [
+            "creditDisplay": "",
+            "guid": guid,
+            "kbsync": kbsync,
+            "salableAdamId": String(appID),
+            "serialNumber": serialNumber,
+            "externalVersionId": version,
+        ]
+    }
+
+    /// Whether an attested-path response should be accepted instead of falling
+    /// back to the legacy chain. A 9610 response is accepted so the existing
+    /// free-license acquisition flow can see it.
+    static func entResponseUsable(_ response: [String: Any], bundleID: String, version: String?) -> Bool {
+        if failureCode(response) == "9610" {
+            return true
+        }
+        return (try? packageItem(response, bundleID: bundleID, version: version)) != nil
     }
 
     static func validatedURL(_ url: URL) throws -> URL {
@@ -98,7 +187,7 @@ enum StoreDownloadProtocol {
         guard url.scheme == "https", url.user == nil, url.password == nil,
               url.fragment == nil, url.port == nil || url.port == 443,
               (storeHost && storePath) || (host == "downloaddispatch.itunes.apple.com"
-                  && [Endpoint.redownload.path, Endpoint.update.path].contains(url.path))
+                  && [Endpoint.redownload.path, Endpoint.update.path, Endpoint.entDownload.path].contains(url.path))
         else { throw StoreDownloadError.invalidRedirect }
         return url
     }

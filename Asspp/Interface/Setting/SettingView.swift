@@ -21,6 +21,12 @@ struct SettingView: View {
     @State private var deviceIdDraft = ""
     @State private var showResetConfirmation = false
 
+    // [Asspp-ent] kbsync blob import state.
+    @State private var kbsyncDSIDDraft = ""
+    @State private var kbsyncBlobDraft = ""
+    @State private var kbsyncBindingDSID: UInt64?
+    @State private var kbsyncMessage: String?
+
     var body: some View {
         NavigationStack {
             formContent
@@ -36,6 +42,41 @@ struct SettingView: View {
         // The AppStore setter also propagates this to ApplePackage.Configuration.
         vm.deviceIdentifier = identifier
         editingDeviceId = false
+    }
+
+    // MARK: - [Asspp-ent] kbsync blob import
+
+    private func refreshKBSyncBinding() async {
+        kbsyncBindingDSID = await KBSyncProvider.shared.storedBinding()?.dsid
+        if kbsyncDSIDDraft.isEmpty, let dsid = vm.accounts.first?.account.directoryServicesIdentifier {
+            kbsyncDSIDDraft = dsid
+        }
+    }
+
+    private func importKBSyncBlob() {
+        guard let dsid = UInt64(kbsyncDSIDDraft.trimmingCharacters(in: .whitespacesAndNewlines)), dsid != 0 else {
+            kbsyncMessage = String(localized: "Enter the numeric DSID of the account the blob was generated for.")
+            return
+        }
+        let blob = kbsyncBlobDraft
+        let guid = vm.deviceIdentifier
+        Task {
+            do {
+                try await KBSyncProvider.shared.importBlob(blob, guid: guid, dsid: dsid)
+                kbsyncBlobDraft = ""
+                kbsyncMessage = nil
+                await refreshKBSyncBinding()
+            } catch {
+                kbsyncMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func removeKBSyncBlob() {
+        Task {
+            await KBSyncProvider.shared.removeBlob()
+            await refreshKBSyncBinding()
+        }
     }
 
     private var formContent: some View {
@@ -138,6 +179,48 @@ struct SettingView: View {
                 Text("Changing the device GUID may cause all existing accounts to stop working. Apple limits the number of devices you can sign in with at once.")
             }
 
+            // [Asspp-ent] Imported kbsync blob for the attested download path.
+            Section {
+                if let kbsyncBindingDSID {
+                    HStack {
+                        Text("Imported Blob")
+                        Spacer()
+                        Text("DSID \(String(kbsyncBindingDSID))")
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("Remove Imported Blob", role: .destructive) {
+                        removeKBSyncBlob()
+                    }
+                }
+                TextField("Account DSID", text: $kbsyncDSIDDraft)
+                    .font(.system(.body, design: .monospaced))
+                    .autocorrectionDisabled()
+                    #if canImport(UIKit)
+                        .textInputAutocapitalization(.never)
+                    #endif
+                TextField("Base64 kbsync Blob", text: $kbsyncBlobDraft, axis: .vertical)
+                    .font(.system(.body, design: .monospaced))
+                    .autocorrectionDisabled()
+                    .lineLimit(3 ... 6)
+                    #if canImport(UIKit)
+                        .textInputAutocapitalization(.never)
+                    #endif
+                Button("Import Blob") {
+                    importKBSyncBlob()
+                }
+                .disabled(kbsyncBlobDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || UInt64(kbsyncDSIDDraft.trimmingCharacters(in: .whitespacesAndNewlines)) == nil)
+                if let kbsyncMessage {
+                    Text(kbsyncMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            } header: {
+                Text("Attested Download")
+            } footer: {
+                Text("Downloads try the attested path first when a kbsync blob is available for the device GUID and an account DSID. Generate a blob with ipatool, then import it here. On-device generation is not supported yet.")
+            }
+
             Section {
                 Button("Reset", role: .destructive) {
                     showResetConfirmation = true
@@ -149,6 +232,9 @@ struct SettingView: View {
             }
         }
         .formStyle(.grouped)
+        .task {
+            await refreshKBSyncBinding()
+        }
         .navigationTitle("Settings")
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
