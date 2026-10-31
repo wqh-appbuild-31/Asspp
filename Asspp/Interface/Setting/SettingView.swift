@@ -24,7 +24,7 @@ struct SettingView: View {
     // [Asspp-ent] kbsync blob import state.
     @State private var kbsyncDSIDDraft = ""
     @State private var kbsyncBlobDraft = ""
-    @State private var kbsyncBindingDSID: UInt64?
+    @State private var kbsyncBindingDSIDs: [UInt64] = []
     @State private var kbsyncMessage: String?
 
     var body: some View {
@@ -46,8 +46,8 @@ struct SettingView: View {
 
     // MARK: - [Asspp-ent] kbsync blob import
 
-    private func refreshKBSyncBinding() async {
-        kbsyncBindingDSID = await KBSyncProvider.shared.storedBinding()?.dsid
+    private func refreshKBSyncBindings() async {
+        kbsyncBindingDSIDs = await KBSyncProvider.shared.storedBindings().map { $0.dsid }
         if kbsyncDSIDDraft.isEmpty, let dsid = vm.accounts.first?.account.directoryServicesIdentifier {
             kbsyncDSIDDraft = dsid
         }
@@ -65,17 +65,17 @@ struct SettingView: View {
                 try await KBSyncProvider.shared.importBlob(blob, guid: guid, dsid: dsid)
                 kbsyncBlobDraft = ""
                 kbsyncMessage = nil
-                await refreshKBSyncBinding()
+                await refreshKBSyncBindings()
             } catch {
                 kbsyncMessage = error.localizedDescription
             }
         }
     }
 
-    private func removeKBSyncBlob() {
+    private func removeKBSyncBlob(dsid: UInt64) {
         Task {
-            await KBSyncProvider.shared.removeBlob()
-            await refreshKBSyncBinding()
+            await KBSyncProvider.shared.removeBlob(dsid: dsid)
+            await refreshKBSyncBindings()
         }
     }
 
@@ -179,17 +179,18 @@ struct SettingView: View {
                 Text("Changing the device GUID may cause all existing accounts to stop working. Apple limits the number of devices you can sign in with at once.")
             }
 
-            // [Asspp-ent] Imported kbsync blob for the attested download path.
+            // [Asspp-ent] Imported kbsync blobs for the attested download path,
+            // one stored blob per account DSID.
             Section {
-                if let kbsyncBindingDSID {
+                ForEach(kbsyncBindingDSIDs, id: \.self) { dsid in
                     HStack {
                         Text("Imported Blob")
                         Spacer()
-                        Text("DSID \(String(kbsyncBindingDSID))")
+                        Text("DSID \(String(dsid))")
                             .foregroundStyle(.secondary)
                     }
                     Button("Remove Imported Blob", role: .destructive) {
-                        removeKBSyncBlob()
+                        removeKBSyncBlob(dsid: dsid)
                     }
                 }
                 TextField("Account DSID", text: $kbsyncDSIDDraft)
@@ -218,7 +219,7 @@ struct SettingView: View {
             } header: {
                 Text("Attested Download")
             } footer: {
-                Text("Downloads try the attested path first when a kbsync blob is available for the device GUID and an account DSID. Generate a blob with ipatool, then import it here. On-device generation is not supported yet.")
+                Text("Downloads try the attested path first when a kbsync blob is available for the device GUID and an account DSID. One blob is stored per account. Generate a blob with ipatool, then import it here. On-device generation is not supported yet.")
             }
 
             Section {
@@ -233,7 +234,7 @@ struct SettingView: View {
         }
         .formStyle(.grouped)
         .task {
-            await refreshKBSyncBinding()
+            await refreshKBSyncBindings()
         }
         .navigationTitle("Settings")
         .toolbar {

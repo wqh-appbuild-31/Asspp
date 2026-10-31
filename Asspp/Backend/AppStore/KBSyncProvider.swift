@@ -13,9 +13,14 @@ import KeychainAccess
 // DSID) and pastes it into Settings. Blobs are long-lived, so an imported blob
 // is a workable stopgap.
 //
-// Cache policy mirrors ipatool's `appstore_kbsync_cache.go`: a single entry
-// keyed by (GUID, DSID), persisted in the Keychain, stored/refreshed only
-// after a blob has served a valid response, and invalidated when rejected.
+// [Asspp-ent] v2: storage holds one entry per account DSID, so several
+// accounts (e.g. a US and a CN account) can each keep their own blob. Entries
+// persist as a list in the Keychain under "kbsync-v2"; a lone pre-v2 entry
+// under "kbsync-v1" is adopted into the list on first load.
+//
+// Cache policy mirrors ipatool's `appstore_kbsync_cache.go`: entries keyed by
+// (GUID, DSID), persisted in the Keychain, stored/refreshed only after a blob
+// has served a valid response, and invalidated when rejected.
 enum KBSyncError: LocalizedError {
     case generationUnavailable
     case invalidBlob
@@ -43,38 +48,48 @@ actor KBSyncProvider {
     }
 
     private let keychain = Keychain(service: "wiki.qaq.Asspp.kbsync")
-    private static let storageKey = "kbsync-v1"
-    private var entry: Entry?
+    private static let storageKey = "kbsync-v2"
+    private static let legacyStorageKey = "kbsync-v1"
+    private var entries: [Entry]?
 
     // MARK: - Import (Phase 2a blob source)
 
-    /// Stores a user-imported blob for the given (GUID, DSID) pair.
+    /// Stores a user-imported blob for the given (GUID, DSID) pair, replacing
+    /// only that DSID's entry and keeping every other account's blob.
     func importBlob(_ base64: String, guid: String, dsid: UInt64) throws {
         // Pasted blobs often arrive wrapped; drop all whitespace first.
         let normalized = base64.components(separatedBy: .whitespacesAndNewlines).joined()
         guard let data = Data(base64Encoded: normalized), !data.isEmpty else {
             throw KBSyncError.invalidBlob
         }
-        store(Entry(guid: guid, dsid: dsid, data: normalized))
+        upsert(Entry(guid: guid, dsid: dsid, data: normalized))
     }
 
-    /// The (GUID, DSID) pair the currently stored blob is bound to, if any.
-    /// Settings uses this to show import state.
-    func storedBinding() -> (guid: String, dsid: UInt64)? {
-        guard let entry = load() else { return nil }
-        return (entry.guid, entry.dsid)
+    /// The (GUID, DSID) pairs that currently have a stored blob. Settings
+    /// uses this to show one row per imported account blob.
+    func storedBindings() -> [(guid: String, dsid: UInt64)] {
+        load().map { (guid: $0.guid, dsid: $0.dsid) }
     }
 
-    func removeBlob() {
-        entry = nil
+    /// Removes the stored blob for one account DSID, if any.
+    func removeBlob(dsid: UInt64) {
+        var current = load()
+        current.removeAll { $0.dsid == dsid }
+        persist(current)
+    }
+
+    /// Removes every stored blob.
+    func removeAll() {
+        entries = []
         try? keychain.remove(Self.storageKey)
+        try? keychain.remove(Self.legacyStorageKey)
     }
 
     // MARK: - Lookup
 
     /// The cached blob for this (GUID, DSID) pair, if one is stored and valid.
     func cachedBlob(guid: String, dsid: UInt64) -> String? {
-        guard let entry = load(), entry.guid == guid, entry.dsid == dsid,
+        guard let entry = load().first(where: { $0.guid == guid && $0.dsid == dsid }),
               let data = Data(base64Encoded: entry.data), !data.isEmpty
         else { return nil }
         return entry.data
@@ -84,14 +99,14 @@ actor KBSyncProvider {
 
     /// Called only after a blob produced a valid attested-download response.
     func recordSuccess(blob: String, guid: String, dsid: UInt64) {
-        store(Entry(guid: guid, dsid: dsid, data: blob))
+        upsert(Entry(guid: guid, dsid: dsid, data: blob))
     }
 
-    /// Called when a cached blob was rejected. Removes the entry only if it
-    /// still holds the exact rejected blob.
+    /// Called when a cached blob was rejected. Removes that DSID's entry
+    /// only if it still holds the exact rejected blob.
     func invalidate(blob: String, guid: String, dsid: UInt64) {
-        guard load() == Entry(guid: guid, dsid: dsid, data: blob) else { return }
-        removeBlob()
+        guard load().contains(Entry(guid: guid, dsid: dsid, data: blob)) else { return }
+        removeBlob(dsid: dsid)
     }
 
     // MARK: - Generation seam (Phase 2b)
@@ -105,21 +120,40 @@ actor KBSyncProvider {
 
     // MARK: - Persistence
 
-    private func load() -> Entry? {
-        if let entry {
-            return entry
+    private func load() -> [Entry] {
+        if let entries {
+            return entries
         }
-        guard let data = try? keychain.getData(Self.storageKey),
-              let decoded = try? JSONDecoder().decode(Entry.self, from: data)
-        else { return nil }
-        entry = decoded
-        return decoded
+        var loaded: [Entry] = []
+        if let data = try? keychain.getData(Self.storageKey),
+           let decoded = try? JSONDecoder().decode([Entry].self, from: data) {
+            loaded = decoded
+        } else if let data = try? keychain.getData(Self.legacyStorageKey),
+                  let legacy = try? JSONDecoder().decode(Entry.self, from: data) {
+            // Adopt the single pre-v2 entry, then drop the legacy key so a
+            // later removal is not undone by re-adopting it.
+            loaded = [legacy]
+            persist(loaded)
+            try? keychain.remove(Self.legacyStorageKey)
+        }
+        entries = loaded
+        return loaded
     }
 
-    private func store(_ newEntry: Entry) {
-        entry = newEntry
-        if let data = try? JSONEncoder().encode(newEntry) {
+    private func persist(_ newEntries: [Entry]) {
+        entries = newEntries
+        if newEntries.isEmpty {
+            try? keychain.remove(Self.storageKey)
+        } else if let data = try? JSONEncoder().encode(newEntries) {
             try? keychain.set(data, key: Self.storageKey)
         }
+    }
+
+    /// Inserts an entry, replacing any existing entry for the same DSID.
+    private func upsert(_ newEntry: Entry) {
+        var current = load()
+        current.removeAll { $0.dsid == newEntry.dsid }
+        current.append(newEntry)
+        persist(current)
     }
 }
