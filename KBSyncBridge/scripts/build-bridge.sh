@@ -56,7 +56,7 @@ cmake -S "$WORK/unicorn-2.1.4" -B "$WORK/ubuild" \
   -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$SDKROOT" \
   -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
   -DCMAKE_C_FLAGS='-target arm64-apple-ios15.0' -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF -DUNICORN_ARCH=arm64 -DUNICORN_BUILD_TESTS=OFF -DUNICORN_INSTALL=OFF
+  -DBUILD_SHARED_LIBS=OFF -DUNICORN_ARCH=aarch64 -DUNICORN_BUILD_TESTS=OFF -DUNICORN_INSTALL=OFF
 cmake --build "$WORK/ubuild" --parallel "$(sysctl -n hw.ncpu)"
 
 UNICORN_LIBS=$(find "$WORK/ubuild" \( -name 'libunicorn*.a' -o -name 'lib*-softmmu.a' \) -type f)
