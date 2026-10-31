@@ -107,7 +107,7 @@ jobs:
           unzip -q Asspp-ent.ipa -d "$check_dir"
           bin="$check_dir/Payload/Asspp.app/Asspp"
           test -f "$bin"
-          for sym in _KBSyncGenerate _uc_open _uc_version; do
+          for sym in _KBSyncGenerate _uc_open _uc_version _ipatool_jit_write_protect; do
             if ! nm -gU "$bin" | grep -q " ${sym}$"; then
               echo "::error::$sym is not an exported symbol of the app binary"
               exit 1

@@ -59,9 +59,17 @@ cmake -S "$WORK/unicorn-2.1.4" -B "$WORK/ubuild" \
   -DBUILD_SHARED_LIBS=OFF -DUNICORN_ARCH=arm64 -DUNICORN_BUILD_TESTS=OFF -DUNICORN_INSTALL=OFF
 cmake --build "$WORK/ubuild" --parallel "$(sysctl -n hw.ncpu)"
 
-UNICORN_LIBS=$(find "$WORK/ubuild" -name 'libunicorn*.a' -type f)
+UNICORN_LIBS=$(find "$WORK/ubuild" \( -name 'libunicorn*.a' -o -name 'lib*-softmmu.a' \) -type f)
 if ! printf '%s\n' "$UNICORN_LIBS" | grep -q 'libunicorn\.a'; then
   echo "libunicorn.a not found in Unicorn build output:" >&2
+  printf '%s\n' "$UNICORN_LIBS" >&2
+  exit 1
+fi
+# The per-guest softmmu archive holds the TCG core (translate-all.c, with
+# the patched ipatool_jit_write_protect); without it the app link fails
+# with an undefined symbol referenced from uc.c.
+if ! printf '%s\n' "$UNICORN_LIBS" | grep -q 'softmmu\.a'; then
+  echo "no lib*-softmmu.a found in Unicorn build output:" >&2
   printf '%s\n' "$UNICORN_LIBS" >&2
   exit 1
 fi
@@ -84,6 +92,10 @@ nm "$OUT/libKBSyncBridge.a" | grep -q ' T _KBSyncGenerate' || {
 }
 nm "$OUT/libKBSyncBridge.a" | grep -q ' T _uc_open' || {
   echo "merged archive is missing uc_open (Unicorn merge failed)" >&2
+  exit 1
+}
+nm "$OUT/libKBSyncBridge.a" | grep -q ' T _ipatool_jit_write_protect' || {
+  echo "merged archive is missing ipatool_jit_write_protect (softmmu archive not merged)" >&2
   exit 1
 }
 
