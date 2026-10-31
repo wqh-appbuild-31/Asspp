@@ -24,6 +24,17 @@ extension AppStore {
                 code: code,
             )
             let userAccount = try save(email: email, account: appleAccount)
+            // [Asspp-ent] Phase 2b: warm up on-device kbsync generation for
+            // the new account in the background (asset download included), so
+            // its first attested download does not pay that cost. Best-effort
+            // only — failure is non-fatal: generation is retried on demand at
+            // download time, and imported blobs keep working.
+            if let dsid = UInt64(userAccount.account.directoryServicesIdentifier), dsid != 0 {
+                let guid = Configuration.deviceIdentifier
+                Task.detached(priority: .utility) {
+                    await KBSyncProvider.shared.pregenerateIfNeeded(guid: guid, dsid: dsid)
+                }
+            }
             logger.info("authentication successful for user")
             return userAccount
         } catch {

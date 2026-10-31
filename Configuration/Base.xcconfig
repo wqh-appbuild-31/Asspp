@@ -77,3 +77,17 @@ ENABLE_PREVIEWS = YES
 SWIFT_EMIT_LOC_STRINGS = YES
 LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks
 LD_RUNPATH_SEARCH_PATHS[sdk=macosx*] = $(inherited) @executable_path/../Frameworks
+
+// MARK: - [Asspp-ent] KBSyncBridge (iOS device only)
+//
+// On-device kbsync generation links the Go c-archive in KBSyncBridge/lib
+// (built by KBSyncBridge/scripts/build-bridge.sh, in CI before the app
+// build) and exposes its C interface through a bridging header.
+// -export_dynamic is required: ipatool's purego layer resolves the
+// statically linked Unicorn API at runtime via dlsym(RTLD_DEFAULT).
+// Scoped to the device SDK so macOS and simulator builds are unaffected
+// (generation reports itself unavailable there, as in Phase 2a).
+
+LIBRARY_SEARCH_PATHS[sdk=iphoneos*] = $(inherited) $(SRCROOT)/KBSyncBridge/lib
+OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) -lKBSyncBridge -Wl,-export_dynamic
+SWIFT_OBJC_BRIDGING_HEADER[sdk=iphoneos*] = $(SRCROOT)/KBSyncBridge/include/KBSyncBridge.h

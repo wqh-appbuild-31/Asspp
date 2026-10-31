@@ -5,13 +5,17 @@ import KeychainAccess
 //
 // A kbsync blob is an opaque FairPlay keybag-sync blob bound to exactly one
 // (device GUID, account DSID) pair. ipatool v2.7.0 generates it by running
-// Apple's storeagent under emulation; that generator is Phase 2b and slots in
-// behind `generateBlob(guid:dsid:)` without changing callers.
+// Apple's storeagent under emulation.
 //
-// Until then the only source is an imported blob: the user generates one with
-// the reference ipatool binary (using this app's own GUID and the account's
-// DSID) and pastes it into Settings. Blobs are long-lived, so an imported blob
-// is a workable stopgap.
+// [Asspp-ent] Phase 2b: generation now runs on-device through the Go bridge
+// (see KBSyncGenerator and KBSyncBridge/), behind the same
+// `generateBlob(guid:dsid:)` seam, so downloads need no user action: a cache
+// miss generates, a rejection invalidates and regenerates once. Imported
+// blobs remain supported as a fallback — the user generates one with the
+// reference ipatool binary (using this app's own GUID and the account's
+// DSID) and pastes it into Settings. On platforms without the bridge
+// (macOS, iOS simulator), generation reports itself unavailable and imports
+// are the only source, exactly as in Phase 2a.
 //
 // [Asspp-ent] v2: storage holds one entry per account DSID, so several
 // accounts (e.g. a US and a CN account) can each keep their own blob. Entries
@@ -23,6 +27,7 @@ import KeychainAccess
 // has served a valid response, and invalidated when rejected.
 enum KBSyncError: LocalizedError {
     case generationUnavailable
+    case generationFailed(String)
     case invalidBlob
     case mismatchedBinding
 
@@ -30,6 +35,8 @@ enum KBSyncError: LocalizedError {
         switch self {
         case .generationUnavailable:
             String(localized: "On-device kbsync generation is not available yet. Import a blob in Settings instead.")
+        case let .generationFailed(message):
+            String(localized: "On-device kbsync generation failed: \(message)")
         case .invalidBlob:
             String(localized: "The kbsync blob is not valid base64 data.")
         case .mismatchedBinding:
@@ -109,13 +116,47 @@ actor KBSyncProvider {
         removeBlob(dsid: dsid)
     }
 
-    // MARK: - Generation seam (Phase 2b)
+    // MARK: - Generation (Phase 2b)
 
-    /// On-device generation via the emulated storeagent is Phase 2b. When it
-    /// lands, this calls into the Go c-archive bridge and returns a fresh
-    /// base64 blob; callers and cache policy do not change.
+    /// In-flight on-device generations, keyed by "guid:dsid", so concurrent
+    /// callers for the same pair share one emulator run.
+    private var activeGenerations: [String: Task<String, Error>] = [:]
+
+    /// Generates a fresh blob for the (GUID, DSID) pair on-device through
+    /// the Go bridge. The result is deliberately NOT cached here: mirroring
+    /// upstream policy, a blob is only persisted (`recordSuccess`) after it
+    /// has served a valid attested-download response.
+    ///
+    /// Generation can take minutes on a fresh install (asset download), so
+    /// it runs in a detached task rather than on this actor's executor.
+    /// Platforms without the bridge (macOS, iOS simulator) throw
+    /// `generationUnavailable`, preserving the Phase 2a behaviour.
     func generateBlob(guid: String, dsid: UInt64) async throws -> String {
+        #if os(iOS) && !targetEnvironment(simulator)
+        let key = "\(guid):\(dsid)"
+        if let task = activeGenerations[key] {
+            return try await task.value
+        }
+        let task = Task.detached(priority: .userInitiated) {
+            try KBSyncGenerator.generate(guid: guid, dsid: dsid)
+        }
+        activeGenerations[key] = task
+        defer { activeGenerations[key] = nil }
+        return try await task.value
+        #else
         throw KBSyncError.generationUnavailable
+        #endif
+    }
+
+    /// Best-effort warm-up after a new account logs in: runs one generation
+    /// for the pair when no blob is stored yet, which pulls the asset bundle
+    /// into the app cache so the first real download does not pay that cost.
+    /// The generated blob itself is discarded (see `generateBlob`); errors
+    /// are swallowed because on-demand generation at download time remains
+    /// the source of truth.
+    func pregenerateIfNeeded(guid: String, dsid: UInt64) async {
+        guard cachedBlob(guid: guid, dsid: dsid) == nil else { return }
+        _ = try? await generateBlob(guid: guid, dsid: dsid)
     }
 
     // MARK: - Persistence

@@ -11,7 +11,9 @@ BUILD_PRODUCT="Asspp.app"
 
 cd $SRCROOT
 
-git clean -fdx -f
+# [Asspp-ent] Keep KBSyncBridge: the CI workflow builds the bridge archive
+# into KBSyncBridge/lib (untracked) immediately before this script runs.
+git clean -fdx -f -e KBSyncBridge
 git reset --hard
 
 # Generate Developer.xcconfig for CI (codesign completely disabled)

@@ -3,12 +3,18 @@
 # Procursus tooling, same CI script (compile.release.mobile.ci.sh), which
 # disables code signing and packages an unsigned .ipa. Sign it afterwards
 # with SideStore before installing.
+#
+# [Asspp-ent] Phase 2b (branch auto-gen): before the app build, the
+# KBSyncBridge generator (Go c-archive + Unicorn, see KBSyncBridge/) is
+# compiled for iOS arm64 and staged into KBSyncBridge/lib, and after the
+# build the app binary is checked to actually export the Unicorn symbols
+# the bridge's purego layer resolves at runtime.
 name: Build Asspp-ent (unsigned IPA)
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, auto-gen]
 
 jobs:
   build-ios:
@@ -54,13 +60,61 @@ jobs:
         with:
           packages: ldid findutils sed coreutils make
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: KBSyncBridge/ipatool/go.mod
+          cache: false
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/Library/Caches/go-build
+          key: ${{ runner.os }}-kbsync-go-${{ hashFiles('KBSyncBridge/ipatool/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-kbsync-go-
+
+      - name: Build KBSyncBridge (Go c-archive + Unicorn, iOS arm64)
+        run: |
+          chmod +x KBSyncBridge/scripts/build-bridge.sh
+          ./KBSyncBridge/scripts/build-bridge.sh
+
+      - name: Stage bridge archive in the git index
+        # The CI script starts with `git clean -fdx`; a staged (indexed)
+        # file is not untracked, so the freshly built archive survives it.
+        # (The script also excludes KBSyncBridge from the clean — this is
+        # belt and braces.)
+        run: git add -f KBSyncBridge/lib/libKBSyncBridge.a
+
       - name: Build unsigned IPA
         run: |
           chmod +x Resources/Scripts/compile.release.mobile.ci.sh
           ./Resources/Scripts/compile.release.mobile.ci.sh "$(pwd)" "$(pwd)/Asspp-ent.ipa"
 
+      - name: Verify bridge symbols in app binary
+        # purego resolves the statically linked Unicorn API at runtime via
+        # dlsym(RTLD_DEFAULT); fail the build if the symbols were stripped
+        # or never linked, instead of shipping an app that only fails on
+        # the device.
+        run: |
+          set -euo pipefail
+          check_dir="$(mktemp -d)"
+          unzip -q Asspp-ent.ipa -d "$check_dir"
+          bin="$check_dir/Payload/Asspp.app/Asspp"
+          test -f "$bin"
+          for sym in _KBSyncGenerate _uc_open _uc_version; do
+            if ! nm -gU "$bin" | grep -q " ${sym}$"; then
+              echo "::error::$sym is not an exported symbol of the app binary"
+              exit 1
+            fi
+          done
+          echo "bridge symbols exported OK"
+          ls -la Asspp-ent.ipa
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Asspp-ent-unsigned-ipa
+          name: Asspp-ent-auto-unsigned-ipa
           path: Asspp-ent.ipa
