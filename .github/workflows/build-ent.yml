@@ -81,12 +81,15 @@ jobs:
           chmod +x KBSyncBridge/scripts/build-bridge.sh
           ./KBSyncBridge/scripts/build-bridge.sh
 
-      - name: Stage bridge archive in the git index
-        # The CI script starts with `git clean -fdx`; a staged (indexed)
-        # file is not untracked, so the freshly built archive survives it.
-        # (The script also excludes KBSyncBridge from the clean — this is
-        # belt and braces.)
-        run: git add -f KBSyncBridge/lib/libKBSyncBridge.a
+      - name: Commit bridge archive into the checkout
+        # The CI script starts with `git clean -fdx` + `git reset --hard`.
+        # Merely staging the archive is not enough (reset --hard deletes
+        # index-only files), so commit it into this disposable checkout:
+        # as part of HEAD it survives both operations.
+        run: |
+          git add -f KBSyncBridge/lib/libKBSyncBridge.a
+          git -c user.name="Asspp-ent CI" -c user.email="ci@localhost" commit -q -m "Stage KBSyncBridge archive for this build"
+          ls -la KBSyncBridge/lib/
 
       - name: Build unsigned IPA
         run: |
