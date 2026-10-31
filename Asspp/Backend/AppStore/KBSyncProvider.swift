@@ -109,7 +109,7 @@ actor KBSyncProvider {
         if let entry {
             return entry
         }
-        guard let data = try? keychain.getData(Self.storageKey), let data,
+        guard let data = try? keychain.getData(Self.storageKey),
               let decoded = try? JSONDecoder().decode(Entry.self, from: data)
         else { return nil }
         entry = decoded
