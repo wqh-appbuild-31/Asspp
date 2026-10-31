@@ -98,18 +98,22 @@ jobs:
 
       - name: Verify bridge symbols in app binary
         # purego resolves the statically linked Unicorn API at runtime via
-        # dlsym(RTLD_DEFAULT); fail the build if the symbols were stripped
-        # or never linked, instead of shipping an app that only fails on
-        # the device.
+        # dlsym(RTLD_DEFAULT), which searches the main executable's export
+        # trie — so check the trie with dyld_info (nm reads the symbol
+        # table, which IPA export may strip even when the trie is fine).
+        # Fail the build if the symbols were never exported, instead of
+        # shipping an app that only fails on the device.
         run: |
           set -euo pipefail
           check_dir="$(mktemp -d)"
           unzip -q Asspp-ent.ipa -d "$check_dir"
           bin="$check_dir/Payload/Asspp.app/Asspp"
           test -f "$bin"
+          dyld_info -exports "$bin" > "$check_dir/exports.txt"
+          wc -l "$check_dir/exports.txt"
           for sym in _KBSyncGenerate _uc_open _uc_version _ipatool_jit_write_protect; do
-            if ! nm -gU "$bin" | grep -q " ${sym}$"; then
-              echo "::error::$sym is not an exported symbol of the app binary"
+            if ! grep -qw -- "$sym" "$check_dir/exports.txt"; then
+              echo "::error::$sym is not in the app binary's export trie"
               exit 1
             fi
           done
