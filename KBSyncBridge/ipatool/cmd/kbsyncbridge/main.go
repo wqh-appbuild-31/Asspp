@@ -11,6 +11,43 @@ package main
 /*
 #include <stdlib.h>
 #include <stdint.h>
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/mman.h>
+
+// kbsync_probe_exec_mmap tests whether this process is allowed to make an
+// anonymous read/write page executable — the exact operation Unicorn's
+// patched ipatool_jit_write_protect performs on its translation buffer
+// before executing translated code (mprotect to PROT_READ|PROT_EXEC on a
+// plain mmap, no MAP_JIT). On iOS that protection change is denied
+// (EACCES) unless the process holds the com.apple.security.cs.allow-jit
+// entitlement or is running under a debugger (CS_DEBUGGED); a free
+// (Personal Team) provisioning profile grants neither, and the patch's
+// failure path is perror + abort(), which would kill the whole app.
+// Probing the identical operation first lets the bridge report a clean
+// error instead. Returns 0 when the operation is permitted, otherwise
+// the errno of the failing call. The probed page holds an aarch64 "ret"
+// opcode but is never called — only the protection change is tested.
+static int kbsync_probe_exec_mmap(void) {
+	long page = sysconf(_SC_PAGESIZE);
+	if (page <= 0) {
+		page = 4096;
+	}
+	unsigned char *p = mmap(NULL, (size_t)page, PROT_READ | PROT_WRITE,
+		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (p == MAP_FAILED) {
+		return errno;
+	}
+	p[0] = 0xc0; p[1] = 0x03; p[2] = 0x5f; p[3] = 0xd6; // aarch64 ret
+	if (mprotect(p, (size_t)page, PROT_READ | PROT_EXEC) != 0) {
+		int e = errno;
+		munmap(p, (size_t)page);
+		return e;
+	}
+	munmap(p, (size_t)page);
+	return 0;
+}
 
 // Unicorn is statically linked into this archive (the build script merges
 // libunicorn.a into libKBSyncBridge.a). ipatool's purego layer resolves the
@@ -93,6 +130,25 @@ func KBSyncGenerate(guidHex *C.char, dsid uint64, outErr **C.char) *C.char {
 
 	if dsid == 0 {
 		return fail("kbsync bridge: invalid DSID: must be nonzero")
+	}
+
+	// Capability preflight (deliberately probed on every call, never
+	// cached — a debugger/JIT enabler attaching later in the session
+	// changes the answer). If iOS will not let this process execute
+	// translated code, fail HERE with a descriptive error: downstream,
+	// Unicorn's ipatool_jit_write_protect reacts to the same denial
+	// with abort(), which took the whole app down on free provisioning
+	// profiles (Asspp-2026-11-01-075815.ips). Failing before the asset
+	// download also avoids pulling ~125 MB that could never be used.
+	if probeErrno := C.kbsync_probe_exec_mmap(); probeErrno != 0 {
+		errnoName := ""
+		switch probeErrno {
+		case 1:
+			errnoName = " (EPERM)"
+		case 13:
+			errnoName = " (EACCES)"
+		}
+		return fail("kbsync bridge: on-device generation unavailable: iOS denied executable memory for the emulator (mprotect to PROT_EXEC on an anonymous page failed, errno %d%s). Unicorn's translated code needs JIT-style executable memory, which a free provisioning profile cannot grant (com.apple.security.cs.allow-jit is a restricted entitlement). Manual blob import still works.", int(probeErrno), errnoName)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
