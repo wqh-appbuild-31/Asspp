@@ -92,6 +92,15 @@ struct PackageView: View {
                             try? FileManager.default.copyItem(at: url, to: newUrl)
                             AirDrop(items: [newUrl])
                         }
+
+                        Button("Share IPA") {
+                            let newUrl = temporaryDirectory
+                                .appendingPathComponent("\(archive.software.bundleID)-\(archive.software.version)")
+                                .appendingPathExtension("ipa")
+                            try? FileManager.default.removeItem(at: newUrl)
+                            try? FileManager.default.copyItem(at: url, to: newUrl)
+                            AirDrop(items: [newUrl])
+                        }
                     } header: {
                         Text("Control")
                     } footer: {
